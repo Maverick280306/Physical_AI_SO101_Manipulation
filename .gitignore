@@ -1,0 +1,9 @@
+# Local datasets and training outputs -- large binary artifacts, not for git.
+datasets/
+outputs/
+*.mp4
+*.pt
+*.safetensors
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
