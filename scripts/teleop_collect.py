@@ -31,6 +31,9 @@ from pathlib import Path
 import numpy as np
 
 os.environ.setdefault("MUJOCO_GL", "egl")
+# os.environ.setdefault("SDL_VIDEODRIVER", "x11")
+# os.environ.setdefault("SDL_RENDER_DRIVER", "software")
+# os.environ.setdefault("SDL_FRAMEBUFFER_ACCELERATION", "0")
 
 from lerobot.envs.factory import make_env  # noqa: E402
 from lerobot.datasets.lerobot_dataset import LeRobotDataset  # noqa: E402
