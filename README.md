@@ -1,180 +1,169 @@
-# Physical AI — SO-101 Manipulation Vertical
+# SO-101 pick-and-place demonstrations for ACT
 
-This is the simulation-first track for our manipulation vertical: validate a full
-imitation-learning pipeline on LeRobot's SO-101 arm in MuJoCo *before* the real
-SO-101 hardware arrives, so we hit the ground running once it does. This repo
-holds the scripts and docs; the actual datasets and model checkpoints you
-produce are **local to your own machine** (`datasets/`, `outputs/` are
-gitignored — they're large binary artifacts, don't try to commit them).
+This repository collects simulation demonstrations of an SO-101 arm picking up
+**the red cube and placing it in the green box**. The other three cubes are
+obstacles. Demonstrations are saved locally as LeRobot datasets for ACT training.
 
-If anything here is unclear or breaks on your setup, say so in an issue/message
-rather than guessing — this was smoke-tested on one Linux laptop (CPU-only, no
-GPU) and your environment may differ.
+## Environment and dependencies
 
-## 1. Setup
-
-You need two things cloned side by side: upstream `lerobot` itself, and this
-repo for the scripts.
+Use the project's Conda environment for every command. On the current machine:
 
 ```bash
-# 1. Clone upstream lerobot and pin to the tested version
-git clone https://github.com/huggingface/lerobot.git ~/lerobot
-cd ~/lerobot && git checkout v0.6.1
-
-# 2. Create an isolated Python 3.12 env (lerobot main requires >=3.12)
-conda create -y -n lerobot312 python=3.12
-conda activate lerobot312
-
-# 3. Install lerobot + the extras we need (training, dataset tools, viz, gamepad)
-pip install -e ".[training,dataset,viz,gamepad]"
-
-# 4. MuJoCo isn't bundled -- install it separately
-pip install "mujoco>=3.0.0,<4.0.0"
-
-# 5. Force offscreen rendering -- a native/onscreen GL context will crash
-#    (segfault / Trace trap) on most headless or driver-less laptops.
-echo 'export MUJOCO_GL=egl' >> ~/.bashrc
-export MUJOCO_GL=egl   # also set it now for this shell
-
-# 6. Clone THIS repo next to it
-git clone <this-repo-url> ~/manipulation-vertical
-```
-
-**Sanity check** — this should print the SO-101 env's observation/action spaces
-with no errors:
-
-```bash
+conda activate lerobot
 cd ~/manipulation-vertical
-python -c "
-from lerobot.envs.factory import make_env
-envs = make_env('lerobot/so101-tabletop-mujoco', n_envs=1, trust_remote_code=True)
-venv = envs['so101_tabletop'][0]
-obs, _ = venv.reset(seed=0)
-print('OK:', venv.observation_space, venv.action_space)
-"
 ```
 
-If it crashes with a native crash / core dump instead of an error message,
-you forgot step 5 — `export MUJOCO_GL=egl` and retry.
+The scripts require Python 3.12, a compatible LeRobot checkout, NumPy, MuJoCo,
+CasADi (with IPOPT), and pygame for optional preview. The current setup uses an
+editable LeRobot checkout at `~/lerobot`. Dataset writing uses its
+`LeRobotDataset.create` API, writer/image-writer helpers, and feature utilities.
+LeRobot API compatibility matters; the older README's version pin has not been
+validated against the current collector.
 
-If `pip install -e lerobot` complains about the Python version, you're on an
-old conda env — make a fresh one with `python=3.12` as above, don't try to
-reuse an existing 3.10/3.11 env.
-
-## 2. The environment
-
-`lerobot/so101-tabletop-mujoco` ([model card](https://huggingface.co/lerobot/so101-tabletop-mujoco)):
-a 6-DOF SO-101 arm, four colored cubes (red/green/blue/yellow), one open box,
-on a tabletop. Observations are `agent_pos` (6 joint angles, degrees) plus
-`front` and `wrist` camera RGB frames (480×640). Actions are absolute joint
-position targets at 30 fps. Reward is the fraction of cubes in the box;
-episode succeeds when all four are in.
-
-**For this task, ignore the "all four cubes" framing** — see the task below.
-
-## 3. Collect demonstrations
-
-Use `scripts/teleop_collect.py`. It opens a window showing the live front
-camera and lets you drive the arm with the keyboard:
-
-| Key | Joint | Key | Joint |
-|---|---|---|---|
-| `q` / `a` | shoulder_pan ∓ | `r` / `f` | wrist_flex ∓ |
-| `w` / `s` | shoulder_lift ∓ | `t` / `g` | wrist_roll ∓ |
-| `e` / `d` | elbow_flex ∓ | `y` / `h` | gripper close/open |
-
-- **SPACE** — end the current episode as a success and save it
-- **x** — discard the current episode (mistake / knocked something over) and retry
-- **ESC** — finalize the dataset and quit
+To install dependencies into an activated project environment when setting up
+another machine:
 
 ```bash
-conda activate lerobot312
-cd ~/manipulation-vertical/scripts
-python teleop_collect.py --repo-id local/so101_pick_place --episodes 20
+cd ~/lerobot
+python -m pip install -e ".[training,dataset]"
+python -m pip install "mujoco>=3,<4" "casadi>=3.7,<4" pygame
 ```
 
-This writes a dataset to `~/manipulation-vertical/datasets/so101_pick_place/`.
+The collector loads `lerobot/so101-tabletop-mujoco` through LeRobot's Hub loader
+with `trust_remote_code=True`. Initial use needs the environment code and assets
+available from Hugging Face; subsequent runs can use the local cache. It expects
+the SO-101 model's named joints, gripper site, jaw geometry, cube, and box.
 
-**Collection notes:**
-- Go slowly and deliberately — a jerky, inconsistent demo teaches the policy
-  a jerky, inconsistent habit. Twenty clean, similar demos beat fifty messy,
-  wildly-varying ones.
-- Keep the cube's *starting position* varied a bit between episodes (don't
-  reset to the exact same spot every time) — a policy trained on one fixed
-  start position learns to reproduce a trajectory, not to actually look at
-  where the cube is.
-- If you discard more than ~1 in 4 episodes, slow down further before
-  continuing.
+MuJoCo defaults to offscreen EGL rendering (`MUJOCO_GL=egl`). A live preview uses
+pygame to display the front camera frames; it does not replace EGL with an
+interactive MuJoCo viewer.
 
-## 4. Train ACT on your demos
+## Collect demonstrations
+
+The single controller in `scripts/solve_path.py` is `optimizer`; no method
+selection flag is needed.
+
+Test without writing a dataset:
+
+```bash
+python scripts/solve_path.py --no-record --episodes 1 --seed 1000
+```
+
+Display the live front camera:
+
+```bash
+python scripts/solve_path.py --no-record --episodes 1 --seed 1000 --preview
+```
+
+On desktops where SDL selects an incompatible Wayland backend, explicitly select
+X11 (requires a working X11/XWayland display):
+
+```bash
+SDL_VIDEODRIVER=x11 SDL_RENDER_DRIVER=software SDL_FRAMEBUFFER_ACCELERATION=0 \
+python scripts/solve_path.py --no-record --episodes 1 --preview
+```
+
+Record four successful demonstrations:
+
+```bash
+python scripts/solve_path.py --repo-id local/act_batch_01 --episodes 4 --seed 1050
+```
+
+The default output directory is `datasets/act_batch_01/`, relative to this
+repository. `--root` selects another directory. **The directory must not already
+exist:** the collector does not append to or resume existing datasets. Nothing
+is uploaded to Hugging Face.
+
+`--episodes` counts successes. Each attempt increments the seed, including
+failures; each invocation starts at the supplied seed (default 1000). By default,
+the collector allows three attempts per requested success. Use `--max-attempts`
+to change that limit. It returns exit code 2 if it cannot collect the requested
+number. The default per-attempt budget is 1800 steps, or 60 simulated seconds.
+Rendering and planning can make wall-clock collection substantially longer.
+
+Press **Ctrl+C** to stop. With preview enabled, **ESC** or window close also stops
+collection. Pending attempts are discarded; completed saved episodes are retained.
+Native solver calls may take time to return before Python handles an interrupt.
+
+Record smaller batches using different dataset names and seed ranges, then merge
+them with LeRobot's dataset tools before training. Copying dataset files together
+manually will not update their episode indices or video references correctly.
+
+## Controller and data format
+
+The optimizer searches Cartesian guide paths, initializes them with bounded
+approximate IK, then uses CasADi/IPOPT to fit a continuous joint spline. Descent
+and initial lift have vertical Cartesian constraints. Timing accounts for joint
+velocity, acceleration, and jerk. MuJoCo checks the resulting path for collisions;
+the carried cube is approximated as rigidly held during planning, while actual
+execution uses physical finger contact.
+
+The gripper opens during reach to a cube-sized aperture. Closure continues
+through a peak-speed handoff and can finish early after stable opposing jaw
+contact. The lift verifies that the cube is held. Placement is accepted only after
+the released cube rests inside the box. `--full-grip-close` disables the early
+contact-based handoff. These checks do not guarantee success for every reset;
+constraints are sampled, and unsuccessful attempts are reported and discarded.
+
+Use `python scripts/solve_path.py --help` for motion limits and other options.
+The preview can remain stationary while planning: simulation does not advance
+while a path is being solved.
+
+Each saved timestep contains:
+
+- `observation.state`: five arm angles in degrees and gripper opening in 0–100.
+- `observation.images.front` and `.wrist`: 480 × 640 RGB camera frames.
+- `action`: absolute joint targets in the same units as the state.
+- LeRobot timestamps, frame/episode indices, and the red-cube task description.
+
+Sampling is 30 simulated FPS. Numeric data is stored in Parquet, camera streams
+in MP4, and schema/statistics/episode information under `meta/`.
+`expert_report.json` records controller settings, completed attempt seeds,
+successes, and failure reasons. `--no-record` writes no dataset; an explicit
+`--report` can still save the attempt report.
+
+`datasets/` and training `outputs/` are gitignored local artifacts.
+
+## Repository structure
+
+- `scripts/solve_path.py`: optimizer, preview, execution, and collection CLI.
+- `scripts/teleop_collect.py`: original keyboard collector and shared recording
+  helpers imported by `solve_path.py`.
+- `tests/test_solve_path.py`: coordinate, IK, motion-limit, recording, and CLI checks.
+
+`teleop_collect.py` remains available separately. Its original task label and
+keyboard workflow differ from the optimizer's red-cube controller.
+
+## Train and evaluate ACT
+
+For a compatible LeRobot installation, an initial training command is:
 
 ```bash
 lerobot-train \
-  --dataset.repo_id=local/so101_pick_place \
-  --dataset.root=~/manipulation-vertical/datasets/so101_pick_place \
+  --dataset.repo_id=local/act_training \
+  --dataset.root="$PWD/datasets/act_training" \
   --policy.type=act --policy.device=cpu --policy.push_to_hub=false \
-  --output_dir=~/manipulation-vertical/outputs/act_pick_place \
+  --output_dir="$PWD/outputs/act_pick_place" \
   --steps=20000 --batch_size=8 --num_workers=0 --wandb.enable=false
 ```
 
-On CPU, expect roughly **5–8 seconds per step** (measured on one laptop with
-no GPU) — 20k steps is a multi-hour-to-overnight run. If you've got a GPU,
-`--policy.device=cuda` will be dramatically faster; say so and we'll route
-heavier training through Advait's GPU-accelerated-RL setup instead of your
-own laptop.
+Use the actual collected or merged dataset name and directory. CUDA can be
+selected with `--policy.device=cuda` when supported by the environment. A complete
+ACT training/evaluation run has not been validated by this repository's tests.
 
-Checkpoints land in `outputs/act_pick_place/checkpoints/`.
+Evaluate on reset seeds excluded from collection and report the red-cube task's
+success rate and failure types. The Hub environment's built-in success condition
+requires **all four cubes**, so it is not the single-red-cube evaluation criterion.
+There is currently no dedicated trained-policy evaluation script in this repo.
 
-## 5. Evaluate what you trained
+## Checks
+
+Run checks in the project environment:
 
 ```bash
-lerobot-eval \
-  --policy.path=~/manipulation-vertical/outputs/act_pick_place/checkpoints/last/pretrained_model \
-  --env.type=... # TODO once eval config for hub envs is confirmed -- flag if this doesn't work out of the box
-  --eval.n_episodes=20
+python -B -m unittest discover -s tests -v
 ```
 
-(`lerobot-eval`'s support for Hub-hosted envs hasn't been exercised yet on
-this repo — if it doesn't accept `lerobot/so101-tabletop-mujoco` directly,
-write a short eval loop yourself using the same `make_env(...)` call from
-step 1's sanity check, run N episodes with the trained policy, and report
-success rate. Don't silently skip evaluation — a trained checkpoint nobody
-measured isn't a result.)
-
-## 6. The task
-
-**Single-task pick-and-place: pick up the red cube and place it in the box.**
-Not all four cubes — that's a much longer-horizon task and a bad first target.
-Ignore the other three cubes entirely; don't worry if they're in the way,
-just don't let starting state vary so much that the red cube is sometimes
-blocked.
-
-## 7. What we're actually trying to learn (the end goal)
-
-The deliverable isn't "a policy exists." It's an honest answer to: **does ACT,
-trained on ~20 teleop demos, reach a real single-task success rate in sim, and
-what does it take to get there?**
-
-Concretely, report back:
-
-1. **Success rate** over 20 held-out eval episodes (different seeds than any
-   training demo), not just "it worked when I watched it once."
-2. **Where it fails**, when it does — stalls short of the cube, grasps but
-   drops it, knocks it past the box, never approaches at all. This matters
-   more than the raw number: it tells us whether the problem is more demos,
-   cleaner demos, or something structural (action scaling, chunk size).
-3. **How many demos it actually took** to cross some reasonable bar (say,
-   50%+ success) — if 20 isn't enough, say so and try 40; we need the real
-   data-efficiency curve, not a guess.
-
-This result feeds directly into the next phase (chaining vs. single
-task-conditioned policies, then sim-to-real transfer once hardware arrives) —
-so a clearly-reported failure is just as useful to us as a clean success.
-Don't polish the number; report what actually happened.
-
-## Questions / blockers
-
-If something in this README doesn't match what you see on your machine, that's
-expected to happen at least once — this was only tested on one setup. Report
-the exact error rather than working around it silently; a wrong assumption
-baked in quietly now costs more to find later.
+These require the cached Hub environment and offscreen rendering. Recording
+checks create temporary datasets and decode their videos; they do not execute a
+full optimizer demonstration or establish policy success rates.

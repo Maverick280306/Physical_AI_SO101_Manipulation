@@ -7,3 +7,7 @@ outputs/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+
+# Generated simulator logs and local rollback copies.
+MUJOCO_LOG.TXT
+.local-backups/

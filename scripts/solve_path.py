@@ -2,9 +2,7 @@
 """Generate physically executed red-cube pick/place demonstrations for ACT.
 
     python scripts/solve_path.py --no-record --episodes 1 --seed 1000
-    python scripts/solve_path.py --motion-method optimized --repo-id local/so101_optimized --episodes 1
-    python scripts/solve_path.py --motion-method optimized --no-record --episodes 1 --preview
-    python scripts/solve_path.py --motion-method optimizer2 --no-record --episodes 1 --preview
+    python scripts/solve_path.py --no-record --episodes 1 --preview
     python scripts/solve_path.py --repo-id local/so101_expert --episodes 20
 
 Run in the same LeRobot environment as teleop_collect.py. Existing datasets are
@@ -50,7 +48,7 @@ class ExpertConfig:
     closed_gripper: float = 0.0
     optimizer_iterations: int = 160
     max_jerk: float = 8.0  # rad/s³, optimized trajectories only
-    contact_grasp: bool = True  # optimizer2: stop closure once the grasp settles
+    contact_grasp: bool = True  # optimizer: stop closure once the grasp settles
 
 
 @dataclass
@@ -399,16 +397,6 @@ def execute_trajectory(trajectory, context: EpisodeContext, allow_cube=False):
         raise PlanningError("Arm did not settle within 0.12 rad")
 
 
-def move_gripper(target: float, context: EpisodeContext):
-    """Ramp the jaw command while holding the arm; permit intended cube contact."""
-    h = context.handles
-    action = model_joints_to_env_action(context.command, h)
-    action[5] = target
-    goal = env_action_to_model_joints(action, h)
-    trajectory = generate_joint_trajectory(context.command, goal, context.config)
-    execute_trajectory(trajectory, context, allow_cube=True)
-
-
 def discard_episode(dataset):
     """Drain image-writer threads before deleting a failed attempt's temp images."""
     if dataset is not None:
@@ -431,20 +419,14 @@ def transfer_rotation(position: np.ndarray) -> np.ndarray:
 
 def get_stage_target(stage: str, scene: dict, config: ExpertConfig):
     """Object-relative position and rotation for the current motion stage."""
-    if stage in ("approach", "pregrasp", "descend", "test_lift", "lift"):
+    if stage in ("approach", "pregrasp", "descend"):
         pos = scene["cube_pos"].copy()
         if stage == "approach":
             pos[2] += config.approach_height
         elif stage == "pregrasp":
             pos[2] += 0.035
-        elif stage == "descend":
-            pos[2] += config.grasp_offset
-        elif stage == "test_lift":
-            pos = scene["gripper_pos"].copy()
-            pos[2] += 0.035
         else:
-            pos = scene["gripper_pos"].copy()
-            pos[2] = config.transfer_height
+            pos[2] += config.grasp_offset
     elif stage in ("transfer", "lower", "retreat"):
         pos = scene["box_pos"].copy()
         pos[2] += config.transfer_height if stage != "lower" else 0.065
@@ -511,90 +493,6 @@ def check_placement(h: EnvironmentHandles) -> bool:
     )
 
 
-def run_expert_episode(h: EnvironmentHandles, config: ExpertConfig, seed: int,
-                       dataset=None, max_steps=1800) -> EpisodeResult:
-    """Execute a checked pick/place; a failure always clears pending recording."""
-    discard_episode(dataset)
-    obs, _ = h.venv.reset(seed=seed)
-    context = EpisodeContext(h, config, obs, h.data.qpos[h.qadr].copy(), dataset, max_steps)
-    try:
-        for _ in range(10):
-            step_and_record(context.command, context)
-        context.stage = "open"
-        move_gripper(config.open_gripper, context)
-        context.stage = "approach"
-        scene = read_scene_state(h)
-        _move_to(*get_stage_target("approach", scene, config), context)
-        context.stage = "plan_grasp"
-        rotation = choose_grasp(read_scene_state(h), context)
-        for stage in ("pregrasp", "descend"):
-            context.stage = stage
-            pos, _ = get_stage_target(stage, read_scene_state(h), config)
-            _move_to(pos, rotation, context, allow_cube=(stage == "descend"))
-        context.stage = "close"
-        move_gripper(config.closed_gripper, context)
-        before = read_scene_state(h)
-        context.stage = "test_lift"
-        pos, _ = get_stage_target("test_lift", before, config)
-        _move_to(pos, rotation, context, allow_cube=True)
-        if not check_grasp(before, read_scene_state(h)):
-            raise PlanningError("Cube did not remain grasped during test lift")
-        for stage in ("lift", "transfer", "lower"):
-            context.stage = stage
-            _move_to(*get_stage_target(stage, read_scene_state(h), config), context, allow_cube=True)
-            if h.data.xpos[h.cube, 2] < 0.035:
-                raise PlanningError("Cube dropped during transfer")
-        context.stage = "release"
-        move_gripper(config.open_gripper, context)
-        context.stage = "retreat"
-        _move_to(*get_stage_target("retreat", read_scene_state(h), config), context, allow_cube=True)
-        context.stage = "validate"
-        for _ in range(20):
-            step_and_record(context.command, context)
-            if not check_placement(h):
-                raise PlanningError("Cube is not resting fully inside the box")
-        return EpisodeResult(True, seed, context.steps, context.stage)
-    except PlanningError as exc:
-        discard_episode(dataset)
-        return EpisodeResult(False, seed, context.steps, context.stage, str(exc))
-    except BaseException:
-        discard_episode(dataset)
-        raise
-
-
-def _sample_spline(knots, samples):
-    """Clamped cubic joint spline: C2 continuous, zero endpoint velocity.
-
-    Derivatives are with respect to normalized time, before duration scaling.
-    Interior knots are pass-through points, not stops.
-    """
-    n = len(knots)
-    spacing = 1.0 / (n - 1)
-    matrix = np.diag(np.full(n, 4.0)) + np.diag(np.ones(n - 1), 1) + np.diag(np.ones(n - 1), -1)
-    matrix[0, 0] = matrix[-1, -1] = 2
-    rhs = np.zeros_like(knots)
-    rhs[1:-1] = 6 * np.diff(knots, n=2, axis=0) / spacing**2
-    rhs[0] = 6 * (knots[1] - knots[0]) / spacing**2
-    rhs[-1] = -6 * (knots[-1] - knots[-2]) / spacing**2
-    second = np.linalg.solve(matrix, rhs)
-    clock = np.linspace(0, 1, samples)
-    t = 10 * clock**3 - 15 * clock**4 + 6 * clock**5
-    rate = (30 * clock**2 - 60 * clock**3 + 30 * clock**4)[:, None]
-    rate2 = (60 * clock - 180 * clock**2 + 120 * clock**3)[:, None]
-    rate3 = (60 - 360 * clock + 360 * clock**2)[:, None]
-    i = np.minimum((t / spacing).astype(int), n - 2)
-    b = ((t - i * spacing) / spacing)[:, None]
-    a = 1 - b
-    left, right = knots[i], knots[i + 1]
-    ml, mr = second[i], second[i + 1]
-    position = a * left + b * right + ((a**3 - a) * ml + (b**3 - b) * mr) * spacing**2 / 6
-    velocity = (right - left) / spacing + ((1 - 3 * a**2) * ml + (3 * b**2 - 1) * mr) * spacing / 6
-    acceleration = a * ml + b * mr
-    jerk = (mr - ml) / spacing
-    return (position, velocity * rate, acceleration * rate**2 + velocity * rate2,
-            jerk * rate**3 + 3 * acceleration * rate * rate2 + velocity * rate3)
-
-
 def _planning_collisions(trajectory, h, carrying=False):
     """Count sampled penetrations, including the carried cube's swept poses.
 
@@ -635,145 +533,8 @@ def _planning_collisions(trajectory, h, carrying=False):
     return violations
 
 
-def optimize_joint_path(waypoints, context, carrying=False):
-    """Local derivative-free optimization of a continuous joint spline.
-
-    Existing IK waypoints initialize the search and softly guide it. Endpoints
-    and gripper command are fixed. Random proposals shorten/smooth the path and
-    penalize collisions; no SciPy or external planner is required. Failed final
-    validation rejects the attempt rather than executing an unsafe fallback.
-    """
-    h, config = context.handles, context.config
-    guides = np.asarray(waypoints, dtype=float)
-    if guides.ndim != 2 or guides.shape[1] != 6 or len(guides) < 2:
-        raise ValueError("Expected at least two six-joint waypoints")
-    knots = np.vstack([guides[0]] + [
-        start + fraction * (end - start)
-        for start, end in zip(guides[:-1], guides[1:])
-        for fraction in (0.5, 1.0)
-    ])
-    reference = knots.copy()
-    rng = np.random.default_rng(0)  # reproducible optimization, independent of reset RNG
-
-    def objective(candidate):
-        if h.preview is not None:
-            h.preview.poll()
-        q, v, a, j = _sample_spline(candidate, 65)
-        excess = np.maximum(h.lower - q, 0) + np.maximum(q - h.upper, 0)
-        return (np.mean(v[:, :5]**2) + 0.005 * np.mean(a[:, :5]**2)
-                + 0.00001 * np.mean(j[:, :5]**2)
-                + 4 * np.mean((candidate - reference)**2)
-                + 1e6 * np.sum(excess**2)
-                + 1e4 * _planning_collisions(q, h, carrying))
-
-    score = objective(knots)
-    for iteration in range(config.optimizer_iterations):
-        candidate = knots.copy()
-        index = int(rng.integers(1, len(knots) - 1))
-        scale = 0.08 * (1 - iteration / max(1, config.optimizer_iterations)) + 0.005
-        candidate[index, :5] += rng.normal(0, scale, 5)
-        candidate[index, :5] = np.clip(candidate[index, :5], h.lower[:5], h.upper[:5])
-        proposal = objective(candidate)
-        if proposal < score:
-            knots, score = candidate, proposal
-    _, v, a, j = _sample_spline(knots, 4097)
-    duration = 1.02 * max(1.0, np.max(np.abs(v)) / config.max_velocity,
-                          np.sqrt(np.max(np.abs(a)) / config.max_acceleration),
-                          np.cbrt(np.max(np.abs(j)) / config.max_jerk))
-    count = int(np.ceil(duration * FPS)) + 1
-    trajectory = _sample_spline(knots, count)[0]
-    trajectory[[0, -1]] = guides[[0, -1]]
-    dense = _sample_spline(knots, max(257, 2 * count))[0]
-    if np.any(dense < h.lower - 1e-7) or np.any(dense > h.upper + 1e-7):
-        raise PlanningError("Optimized spline exceeds joint limits")
-    if _planning_collisions(dense, h, carrying):
-        raise PlanningError("Optimized spline failed collision validation")
-    if context.steps + count > context.max_steps:
-        raise PlanningError("Optimized motion exceeds remaining episode step budget")
-    return trajectory
-
-
-def execute_optimized_path(waypoints, context, carrying=False):
-    """Execute one optimized reach/transfer with no holds at interior waypoints."""
-    trajectory = optimize_joint_path(waypoints, context, carrying)
-    h = context.handles
-    for q in trajectory[1:]:
-        step_and_record(q, context, allow_cube=carrying)
-        if carrying and h.data.xpos[h.cube, 2] < 0.035:
-            raise PlanningError("Cube dropped during optimized transfer")
-    # Settle only at the actual grasp/place destination, not at intermediate guides.
-    for _ in range(round(0.15 * FPS)):
-        step_and_record(trajectory[-1], context, allow_cube=carrying)
-    if np.max(np.abs(h.data.qpos[h.qadr[:5]] - trajectory[-1, :5])) > 0.12:
-        raise PlanningError("Optimized endpoint did not settle")
-
-
-def run_optimized_episode(h, config, seed, dataset=None, max_steps=1800):
-    """Alternative controller; the original run_expert_episode stays unchanged."""
-    discard_episode(dataset)
-    obs, _ = h.venv.reset(seed=seed)
-    context = EpisodeContext(h, config, obs, h.data.qpos[h.qadr].copy(), dataset, max_steps)
-    try:
-        for _ in range(10):
-            step_and_record(context.command, context)
-        context.stage = "open"
-        move_gripper(config.open_gripper, context)
-        context.stage = "optimized_reach"
-        scene = read_scene_state(h)
-        # Reuse the existing grasp selection without physically moving to approach.
-        approach = solve_ik(*get_stage_target("approach", scene, config),
-                            context.command, h, config)
-        grasp_context = EpisodeContext(h, config, context.obs, approach)
-        rotation = choose_grasp(scene, grasp_context)
-        waypoints = [context.command.copy(), approach]
-        # Pregrasp is now the fixed endpoint, not an adjustable interior knot.
-        # The optimizer cannot move it or bend the final grasp descent.
-        pos, _ = get_stage_target("pregrasp", scene, config)
-        waypoints.append(solve_ik(pos, rotation, waypoints[-1], h, config))
-        execute_optimized_path(waypoints, context)
-        context.stage = "descend"
-        # Keep the original scripted descent outside the optimizer. Re-read the
-        # scene and reject cube movement rather than chasing a disturbed target.
-        current_scene = read_scene_state(h)
-        if np.linalg.norm(current_scene["cube_pos"] - scene["cube_pos"]) > 0.005:
-            raise PlanningError("Cube moved before descent; fixed grasp target is stale")
-        pos, _ = get_stage_target("descend", scene, config)
-        _move_to(pos, rotation, context, allow_cube=True)
-        context.stage = "close"
-        move_gripper(config.closed_gripper, context)
-        before = read_scene_state(h)
-        context.stage = "test_lift"
-        pos, _ = get_stage_target("test_lift", before, config)
-        _move_to(pos, rotation, context, allow_cube=True)
-        if not check_grasp(before, read_scene_state(h)):
-            raise PlanningError("Cube did not remain grasped during test lift")
-        context.stage = "optimized_transfer"
-        scene = read_scene_state(h)
-        waypoints = [context.command.copy()]
-        for stage in ("lift", "transfer", "lower"):
-            pos, rot = get_stage_target(stage, scene, config)
-            waypoints.append(solve_ik(pos, rot, waypoints[-1], h, config))
-        execute_optimized_path(waypoints, context, carrying=True)
-        context.stage = "release"
-        move_gripper(config.open_gripper, context)
-        context.stage = "retreat"
-        _move_to(*get_stage_target("retreat", read_scene_state(h), config), context, allow_cube=True)
-        context.stage = "validate"
-        for _ in range(20):
-            step_and_record(context.command, context)
-            if not check_placement(h):
-                raise PlanningError("Cube is not resting fully inside the box")
-        return EpisodeResult(True, seed, context.steps, context.stage)
-    except PlanningError as exc:
-        discard_episode(dataset)
-        return EpisodeResult(False, seed, context.steps, context.stage, str(exc))
-    except BaseException:
-        discard_episode(dataset)
-        raise
-
-
 @dataclass
-class Optimizer2Plan:
+class OptimizerPlan:
     trajectory: np.ndarray
     vertical_end: int
     closure_tail: np.ndarray | None = None
@@ -876,7 +637,7 @@ def _cartesian_curve(points, rotations, vertical_segment, parameters, tangent_sc
     return np.asarray(positions), orientations, boundaries
 
 
-def _optimizer2_ik(points, rotations, vertical_segment, tangent, context, samples):
+def _optimizer_ik(points, rotations, vertical_segment, tangent, context, samples):
     h = context.handles
     parameters = np.linspace(0, 1, samples)
     positions, matrices, boundaries = _cartesian_curve(
@@ -1010,7 +771,7 @@ def _casadi_site_kinematics(h, ca):
     return fk
 
 
-def _smooth_optimizer2_path(seed, points, rotations, vertical_segment, tangent, context):
+def _smooth_optimizer_path(seed, points, rotations, vertical_segment, tangent, context):
     """Fit joint spline with Cartesian constraints using CasADi + IPOPT.
 
     IK provides an initial guess only. The final path is a C2 joint spline,
@@ -1020,7 +781,7 @@ def _smooth_optimizer2_path(seed, points, rotations, vertical_segment, tangent, 
     try:
         import casadi as ca
     except ImportError as exc:
-        raise PlanningError("optimizer2 requires CasADi in the active LeRobot environment") from exc
+        raise PlanningError("optimizer requires CasADi in the active LeRobot environment") from exc
     h = context.handles
     fk = _casadi_site_kinematics(h, ca)
     count = 33
@@ -1070,7 +831,7 @@ def _smooth_optimizer2_path(seed, points, rotations, vertical_segment, tangent, 
     return SmoothJointPath(all_knots)
 
 
-def _optimizer2_timed_path(path, context, boundaries, vertical_segment, jaw=None):
+def _optimizer_timed_path(path, context, boundaries, vertical_segment, jaw=None):
     """Retiming includes all six joints and the closure tail in sampled limits."""
     config = context.config
     duration = path.minimum_duration(config)
@@ -1116,11 +877,11 @@ def _optimizer2_timed_path(path, context, boundaries, vertical_segment, jaw=None
         if ratio <= 1.001:
             if context.steps + len(combined) > context.max_steps:
                 raise PlanningError(
-                    f"optimizer2 needs {len(combined)} steps ({len(combined)/FPS:.1f}s); "
+                    f"optimizer needs {len(combined)} steps ({len(combined)/FPS:.1f}s); "
                     f"only {context.max_steps-context.steps} remain"
                 )
             vertical_end = int(np.searchsorted(parameter, boundaries[vertical_segment + 1]))
-            return Optimizer2Plan(trajectory, vertical_end, tail, peak if jaw is not None else 0.)
+            return OptimizerPlan(trajectory, vertical_end, tail, peak if jaw is not None else 0.)
         # Jaw peak must also slow down when time scaling is needed.
         duration *= max(1.1, 1.05 * ratio)
         if jaw is not None:
@@ -1128,11 +889,11 @@ def _optimizer2_timed_path(path, context, boundaries, vertical_segment, jaw=None
             closing_before = 2 * (opened - handoff) / peak
             closing_after = 2 * (handoff - closed) / peak
             duration = max(duration, closing_before + 1.)
-    raise PlanningError("optimizer2 could not satisfy sampled motion limits")
+    raise PlanningError("optimizer could not satisfy sampled motion limits")
 
 
-def optimizer2(points, rotations, vertical_segment, context, carrying=False, jaw=None):
-    """Constrained Cartesian path search, retaining both earlier controllers.
+def optimizer(points, rotations, vertical_segment, context, carrying=False, jaw=None):
+    """Optimize the Cartesian guides, then fit and retime a constrained joint spline.
 
     Vertical endpoints/tangents and endpoint orientations are fixed. Only free
     waypoints and the through-velocity of the vertical join are searched. This
@@ -1141,7 +902,7 @@ def optimizer2(points, rotations, vertical_segment, context, carrying=False, jaw
     tracking is checked during execution rather than claimed to be exact.
     """
     h, config = context.handles, context.config
-    print(f"[PLAN] optimizer2 {'transfer' if carrying else 'reach'}: searching Cartesian path", flush=True)
+    print(f"[PLAN] optimizer {'transfer' if carrying else 'reach'}: searching Cartesian path", flush=True)
     reference = np.asarray(points, dtype=float)
     best, tangent = reference.copy(), 0.45
     fixed = {0, len(points) - 1, vertical_segment, vertical_segment + 1}
@@ -1150,7 +911,7 @@ def optimizer2(points, rotations, vertical_segment, context, carrying=False, jaw
     seed_failures = []
     def objective(candidate, slope):
         try:
-            q, _ = _optimizer2_ik(candidate, rotations, vertical_segment, slope, context, 33)
+            q, _ = _optimizer_ik(candidate, rotations, vertical_segment, slope, context, 33)
             if jaw is not None:
                 q[1:, 5] = jaw[0]  # conservative collision screen at open width
             collision = _planning_collisions(q, h, carrying)
@@ -1174,14 +935,14 @@ def optimizer2(points, rotations, vertical_segment, context, carrying=False, jaw
             best, tangent, score = candidate, slope, value
     if not np.isfinite(score):
         detail = seed_failures[0] if seed_failures else "no finite initialization objective"
-        raise PlanningError(f"optimizer2 found no usable IK initialization; first rejection: {detail}")
-    path, boundaries = _optimizer2_ik(best, rotations, vertical_segment, tangent, context, 257)
-    smooth_path = _smooth_optimizer2_path(path, best, rotations, vertical_segment, tangent, context)
-    plan = _optimizer2_timed_path(smooth_path, context, boundaries, vertical_segment, jaw)
+        raise PlanningError(f"optimizer found no usable IK initialization; first rejection: {detail}")
+    path, boundaries = _optimizer_ik(best, rotations, vertical_segment, tangent, context, 257)
+    smooth_path = _smooth_optimizer_path(path, best, rotations, vertical_segment, tangent, context)
+    plan = _optimizer_timed_path(smooth_path, context, boundaries, vertical_segment, jaw)
     if np.any(plan.trajectory < h.lower - 1e-7) or np.any(plan.trajectory > h.upper + 1e-7):
-        raise PlanningError("optimizer2 trajectory exceeds joint limits")
+        raise PlanningError("optimizer trajectory exceeds joint limits")
     if _planning_collisions(plan.trajectory, h, carrying):
-        raise PlanningError("optimizer2 timed path failed collision validation")
+        raise PlanningError("optimizer timed path failed collision validation")
     # Joint interpolation can deviate from Cartesian targets: reject, don't
     # silently call a curved or overshooting descent 'vertical'.
     clock = np.linspace(0, 1, len(plan.trajectory))
@@ -1196,11 +957,11 @@ def optimizer2(points, rotations, vertical_segment, context, carrying=False, jaw
         mujoco.mj_forward(h.model, d)
         actual = d.site_xpos[h.site]
         if np.linalg.norm(actual - target) > 0.003:
-            raise PlanningError("optimizer2 Cartesian path error exceeds 3 mm")
+            raise PlanningError("optimizer Cartesian path error exceeds 3 mm")
         if boundaries[vertical_segment] <= u <= boundaries[vertical_segment + 1]:
             if np.linalg.norm(actual[:2] - best[vertical_segment, :2]) > 0.002:
-                raise PlanningError("optimizer2 vertical segment deviates laterally by over 2 mm")
-    print(f"[PLAN] optimizer2 frames={len(plan.trajectory)} "
+                raise PlanningError("optimizer vertical segment deviates laterally by over 2 mm")
+    print(f"[PLAN] optimizer frames={len(plan.trajectory)} "
           f"closing_peak={plan.closing_speed:.3f} rad/s", flush=True)
     return plan
 
@@ -1261,7 +1022,7 @@ def grip_in_motion(plan, context):
         step_and_record(context.command, context, allow_cube=True)
 
 
-def _optimizer2_step(q, index, plan, context, carrying=False):
+def _optimizer_step(q, index, plan, context, carrying=False):
     """Reject physical lateral drift instead of silently accepting it as vertical."""
     step_and_record(q, context, allow_cube=carrying)
     if plan.vertical_start <= index <= plan.vertical_end:
@@ -1270,7 +1031,7 @@ def _optimizer2_step(q, index, plan, context, carrying=False):
             raise PlanningError("Physical vertical tracking drift exceeds 4 mm")
 
 
-def run_optimizer2_episode(h, config, seed, dataset=None, max_steps=1800):
+def run_optimizer_episode(h, config, seed, dataset=None, max_steps=1800):
     discard_episode(dataset)
     obs, _ = h.venv.reset(seed=seed)
     context = EpisodeContext(h, config, obs, h.data.qpos[h.qadr].copy(), dataset, max_steps)
@@ -1278,7 +1039,7 @@ def run_optimizer2_episode(h, config, seed, dataset=None, max_steps=1800):
         for _ in range(10):
             step_and_record(context.command, context)
         scene = read_scene_state(h)
-        context.stage = "optimizer2_reach"
+        context.stage = "optimizer_reach"
         approach_pos, approach_rotation = get_stage_target("approach", scene, config)
         approach_q = solve_ik(approach_pos, approach_rotation, context.command, h, config)
         selection = EpisodeContext(h, config, context.obs, approach_q.copy())
@@ -1292,15 +1053,15 @@ def run_optimizer2_episode(h, config, seed, dataset=None, max_steps=1800):
         grasp, _ = get_stage_target("descend", scene, config)
         points = np.array([scene["gripper_pos"], approach_pos, pre, grasp])
         rotations = [scene["gripper_rotation"], approach_rotation, rotation, rotation]
-        plan = optimizer2(points, rotations, 2, context, jaw=jaw)
+        plan = optimizer(points, rotations, 2, context, jaw=jaw)
         for index, q in enumerate(plan.trajectory[1:], 1):
-            _optimizer2_step(q, index, plan, context)
+            _optimizer_step(q, index, plan, context)
             if np.linalg.norm(h.data.xpos[h.cube] - scene["cube_pos"]) > 0.005:
-                raise PlanningError("Cube moved before optimizer2 closing handoff")
-        context.stage = "optimizer2_grip"
+                raise PlanningError("Cube moved before optimizer closing handoff")
+        context.stage = "optimizer_grip"
         grip_in_motion(plan, context)
         before = read_scene_state(h)
-        context.stage = "optimizer2_transfer"
+        context.stage = "optimizer_transfer"
         start = before["gripper_pos"].copy()
         lifted = start + [0, 0, 0.035]
         high = start.copy()
@@ -1310,16 +1071,16 @@ def run_optimizer2_episode(h, config, seed, dataset=None, max_steps=1800):
         points = np.array([start, lifted, high, over, lower])
         rotations = [before["gripper_rotation"], before["gripper_rotation"],
                      transfer_rotation(high), over_rotation, lower_rotation]
-        plan = optimizer2(points, rotations, 0, context, carrying=True)
+        plan = optimizer(points, rotations, 0, context, carrying=True)
         checked = False
         for index, q in enumerate(plan.trajectory[1:], 1):
-            _optimizer2_step(q, index, plan, context, carrying=True)
+            _optimizer_step(q, index, plan, context, carrying=True)
             if not checked and index >= plan.vertical_end:
                 if not check_grasp(before, read_scene_state(h)):
-                    raise PlanningError("Cube failed optimizer2 vertical test lift")
+                    raise PlanningError("Cube failed optimizer vertical test lift")
                 checked = True
             if checked and h.data.xpos[h.cube, 2] < 0.035:
-                raise PlanningError("Cube dropped during optimizer2 transfer")
+                raise PlanningError("Cube dropped during optimizer transfer")
         context.stage = "release"
         # Reopen only to the same cube-sized aperture, not the old wide setting.
         release = context.command.copy()
@@ -1355,9 +1116,7 @@ def collect_demonstrations(h, config, args, dataset=None) -> list[EpisodeResult]
     successes = 0
     try:
         for attempt in range(args.max_attempts):
-            runner = {"scripted": run_expert_episode, "optimized": run_optimized_episode,
-                      "optimizer2": run_optimizer2_episode}[args.motion_method]
-            result = runner(h, config, args.seed + attempt, dataset, args.max_steps)
+            result = run_optimizer_episode(h, config, args.seed + attempt, dataset, args.max_steps)
             if result.success:
                 save_successful_episode(dataset, result)
                 successes += 1
@@ -1378,7 +1137,6 @@ def collect_demonstrations(h, config, args, dataset=None) -> list[EpisodeResult]
                 "seed_start": args.seed,
                 "requested_episodes": args.episodes,
                 "recording": dataset is not None,
-                "motion_method": args.motion_method,
                 "successes": successes,
                 "attempts": len(results),
                 "failures_by_stage": dict(Counter(r.stage for r in results if not r.success)),
@@ -1395,12 +1153,10 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--motion-method", choices=("scripted", "optimized", "optimizer2"), default="scripted",
-                        help="Original stages, joint splines, or Cartesian optimizer2 with integrated gripper timing")
     parser.add_argument("--optimizer-iterations", type=int, default=160)
     parser.add_argument("--max-jerk", type=float, default=8.0, help="Optimized motion limit, rad/s³")
     parser.add_argument("--full-grip-close", action="store_true",
-                        help="optimizer2: use the previous full closure instead of contact-based handoff")
+                        help="optimizer: use the previous full closure instead of contact-based handoff")
     parser.add_argument("--repo-id", default="local/so101_expert")
     parser.add_argument("--root", type=Path, help="New dataset directory; must not exist")
     parser.add_argument("--episodes", type=int, default=20, help="Number of successful demos requested")

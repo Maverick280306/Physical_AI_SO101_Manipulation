@@ -1,0 +1,192 @@
+{
+  "task": "Pick up the red cube and place it in the green box.",
+  "config": {
+    "position_tolerance": 0.0015,
+    "orientation_tolerance": 0.07,
+    "max_velocity": 0.8,
+    "max_acceleration": 1.6,
+    "approach_height": 0.08,
+    "transfer_height": 0.11,
+    "grasp_offset": -0.003,
+    "open_gripper": 60.0,
+    "closed_gripper": 0.0,
+    "optimizer_iterations": 160,
+    "max_jerk": 8.0,
+    "contact_grasp": true
+  },
+  "mujoco_version": "3.17.0",
+  "seed_start": 1050,
+  "requested_episodes": 20,
+  "recording": true,
+  "motion_method": "optimizer2",
+  "successes": 20,
+  "attempts": 23,
+  "failures_by_stage": {
+    "optimizer2_transfer": 1,
+    "optimizer2_reach": 1,
+    "validate": 1
+  },
+  "results": [
+    {
+      "success": true,
+      "seed": 1050,
+      "steps": 476,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": true,
+      "seed": 1051,
+      "steps": 457,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": true,
+      "seed": 1052,
+      "steps": 435,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": true,
+      "seed": 1053,
+      "steps": 513,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": true,
+      "seed": 1054,
+      "steps": 447,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": true,
+      "seed": 1055,
+      "steps": 479,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": true,
+      "seed": 1056,
+      "steps": 484,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": true,
+      "seed": 1057,
+      "steps": 462,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": true,
+      "seed": 1058,
+      "steps": 473,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": true,
+      "seed": 1059,
+      "steps": 455,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": false,
+      "seed": 1060,
+      "steps": 372,
+      "stage": "optimizer2_transfer",
+      "reason": "Cube dropped during optimizer2 transfer"
+    },
+    {
+      "success": false,
+      "seed": 1061,
+      "steps": 10,
+      "stage": "optimizer2_reach",
+      "reason": "No reachable, collision-free vertical grasp/pregrasp pair"
+    },
+    {
+      "success": true,
+      "seed": 1062,
+      "steps": 580,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": true,
+      "seed": 1063,
+      "steps": 468,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": true,
+      "seed": 1064,
+      "steps": 443,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": true,
+      "seed": 1065,
+      "steps": 471,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": true,
+      "seed": 1066,
+      "steps": 441,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": true,
+      "seed": 1067,
+      "steps": 508,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": true,
+      "seed": 1068,
+      "steps": 456,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": true,
+      "seed": 1069,
+      "steps": 449,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": false,
+      "seed": 1070,
+      "steps": 493,
+      "stage": "validate",
+      "reason": "Cube is not resting fully inside the box"
+    },
+    {
+      "success": true,
+      "seed": 1071,
+      "steps": 420,
+      "stage": "validate",
+      "reason": ""
+    },
+    {
+      "success": true,
+      "seed": 1072,
+      "steps": 418,
+      "stage": "validate",
+      "reason": ""
+    }
+  ]
+}

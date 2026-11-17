@@ -129,15 +129,6 @@ class ExpertTests(unittest.TestCase):
         finally:
             raw._max_episode_steps = original
 
-    def test_expert_physics(self):
-        # Controller/contact regression with real physics; omit RGB rendering here.
-        # Camera rendering and saved video decoding are checked separately.
-        pixels = np.zeros((480, 640, 3), dtype=np.uint8)
-        with patch.object(self.h.world, "render", return_value=pixels):
-            result = sp.run_expert_episode(self.h, sp.ExpertConfig(), seed=1000)
-        self.assertTrue(result.success, result)
-        self.assertTrue(sp.check_placement(self.h))
-
     def test_grasp_rejects_empty_lift(self):
         before = {"cube_pos": np.array([.2, 0, .015]), "gripper_pos": np.array([.2, 0, .015])}
         empty = {"cube_pos": before["cube_pos"], "gripper_pos": np.array([.2, 0, .05])}
@@ -154,7 +145,7 @@ class ExpertTests(unittest.TestCase):
             dataset = sp.build_dataset("local/expert_test", root)
             try:
                 # A timed-out attempt must leave no frames or episode behind.
-                result = sp.run_expert_episode(self.h, sp.ExpertConfig(), 1000, dataset, max_steps=2)
+                result = sp.run_optimizer_episode(self.h, sp.ExpertConfig(), 1000, dataset, max_steps=2)
                 self.assertFalse(result.success)
                 self.assertEqual(dataset.num_episodes, 0)
                 self.assertFalse(dataset.has_pending_frames())
@@ -193,8 +184,10 @@ class ExpertTests(unittest.TestCase):
     def test_cli_validation(self):
         args = sp.parse_args(["--no-record", "--episodes", "2"])
         self.assertEqual(args.max_attempts, 6)
+        self.assertFalse(hasattr(args, "motion_method"))
         for options in (["--episodes", "0"], ["--max-velocity", "nan"],
-                        ["--root", "/tmp"], ["--repo-id", "local/.."]):
+                        ["--root", "/tmp"], ["--repo-id", "local/.."],
+                        ["--motion-method", "scripted"]):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 sp.parse_args(options)
 
